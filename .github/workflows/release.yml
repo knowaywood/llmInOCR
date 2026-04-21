@@ -1,0 +1,185 @@
+name: Build And Release
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - created
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  detect-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      should_release: ${{ steps.meta.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide Release Version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_version=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('src/Cargo.toml').read_text(encoding='utf-8'))
+          print(data['package']['version'])
+          PY
+          )
+
+          current_tag="v${current_version}"
+          event_name="${{ github.event_name }}"
+          release_tag="${{ github.event.release.tag_name || '' }}"
+          before_sha="${{ github.event.before }}"
+          previous_version=""
+
+          if [ -n "${before_sha}" ] && [ "${before_sha}" != "0000000000000000000000000000000000000000" ]; then
+            if git cat-file -e "${before_sha}:src/Cargo.toml" 2>/dev/null; then
+              previous_version=$(git show "${before_sha}:src/Cargo.toml" | python - <<'PY'
+          import sys, tomllib
+          data = tomllib.loads(sys.stdin.read())
+          print(data['package']['version'])
+          PY
+              )
+            fi
+          fi
+
+          version_changed="false"
+          if [ -n "${previous_version}" ] && [ "${previous_version}" != "${current_version}" ]; then
+            version_changed="true"
+          fi
+
+          if [ "${event_name}" = "workflow_dispatch" ]; then
+            version_changed="true"
+          fi
+
+          if [ "${event_name}" = "release" ] && [ -n "${release_tag}" ]; then
+            current_tag="${release_tag}"
+            current_version="${release_tag#v}"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${current_tag}" >/dev/null; then
+            tag_exists="true"
+          else
+            tag_exists="false"
+          fi
+
+          should_release="false"
+          if [ "${version_changed}" = "true" ] && [ "${tag_exists}" = "false" ]; then
+            should_release="true"
+          fi
+          if [ "${event_name}" = "release" ]; then
+            should_release="true"
+          fi
+
+          echo "version=${current_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${current_tag}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
+
+  build-binaries:
+    needs: detect-version
+    if: needs.detect-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_label: linux-x64
+            package_ext: tar.xz
+            binary_name: llminocr
+          - os: windows-latest
+            artifact_label: windows-x64
+            package_ext: zip
+            binary_name: llminocr.exe
+          - os: macos-latest
+            artifact_label: macos
+            package_ext: tar.xz
+            binary_name: llminocr
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config \
+            patchelf
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src -> target
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_name="llminocr-${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_label }}.${{ matrix.package_ext }}"
+          tar -C target/release -cJf "${archive_name}" "${{ matrix.binary_name }}"
+          echo "ARCHIVE_NAME=${archive_name}" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archiveName = "llminocr-${{ needs.detect-version.outputs.version }}-${{ matrix.artifact_label }}.${{ matrix.package_ext }}"
+          Compress-Archive -Path "target/release/${{ matrix.binary_name }}" -DestinationPath $archiveName -Force
+          "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_label }}
+          path: src/${{ env.ARCHIVE_NAME }}
+
+  release:
+    needs:
+      - detect-version
+      - build-binaries
+    if: needs.detect-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.detect-version.outputs.tag }}
+          name: ${{ needs.detect-version.outputs.tag }}
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
+          files: release-assets/**/*
+          fail_on_unmatched_files: true

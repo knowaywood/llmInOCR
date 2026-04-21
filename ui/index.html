@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>llmInOCR Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="tabs">
+        <button id="tab-convert" class="tab-btn active" data-tab="convert">Convert</button>
+        <button id="tab-settings" class="tab-btn" data-tab="settings">Settings</button>
+      </header>
+
+      <section id="panel-convert" class="panel active">
+        <div class="panel-grid">
+          <div class="left-pane">
+            <h3>Input (Text / Images)</h3>
+
+            <div id="image-preview" class="image-preview">No image attached</div>
+
+            <select id="image-list" class="image-list" multiple></select>
+
+            <div class="row">
+              <input id="file-input" type="file" accept="image/*" multiple hidden />
+              <button id="select-images">Select Images</button>
+              <button id="delete-selected" disabled>Delete Selected</button>
+            </div>
+
+            <textarea
+              id="input-text"
+              placeholder="Type text, or paste images with Ctrl+V, or drag multiple images here"
+            ></textarea>
+
+            <div class="row row-right">
+              <button id="stop-btn">Stop</button>
+              <button id="convert-btn" class="primary">Convert</button>
+            </div>
+          </div>
+
+          <div class="right-pane">
+            <h3>Result</h3>
+            <textarea id="output-text" readonly></textarea>
+            <button id="copy-result">Copy Result</button>
+            <p id="status-label">Ready</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-settings" class="panel">
+        <div class="settings-form">
+          <label for="output-format">Output Format</label>
+          <select id="output-format">
+            <option value="typst">typst</option>
+            <option value="latex">latex</option>
+            <option value="mathtype">mathtype</option>
+          </select>
+
+          <label for="theme-mode">Theme</label>
+          <select id="theme-mode">
+            <option value="light">light</option>
+            <option value="dark">dark</option>
+          </select>
+
+          <label for="model">Model</label>
+          <input id="model" type="text" />
+
+          <label for="api-key">API Key</label>
+          <input
+            id="api-key"
+            type="password"
+            placeholder="Leave empty to use .env QWEN_API_KEY / DASHSCOPE_API_KEY"
+          />
+
+          <label for="base-url">Qwen Base URL</label>
+          <input id="base-url" type="text" placeholder="Leave empty to use .env QWEN_BASE_URL" />
+
+          <button id="save-settings" class="primary">Save Settings</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

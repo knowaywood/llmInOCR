@@ -35,11 +35,12 @@ impl Default for OutputFormat {
 enum ThemeMode {
     Light,
     Dark,
+    System,
 }
 
 impl Default for ThemeMode {
     fn default() -> Self {
-        Self::Light
+        Self::System
     }
 }
 
@@ -57,7 +58,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             output_format: OutputFormat::Latex,
-            theme_mode: ThemeMode::Light,
+            theme_mode: ThemeMode::System,
             model: DEFAULT_MODEL.to_string(),
             api_key: None,
             qwen_base_url: None,
@@ -185,7 +186,7 @@ fn format_instruction(output_format: &OutputFormat) -> String {
         return base;
     }
 
-    let typst_rules = " Use strict Typst syntax. For inline math, write with single dollar delimiters like `$ x^2 + y^2 $`. For display (block) math, write equation content on its own line with `$ ... $`. Use fraction as `symbol/` form such as `a/b`, `x/(y+1)`, and avoid `frac(...)`. Always use `dots` instead of `cdots` (for example `a_1, a_2, dots, a_n`). Return valid Typst content only.";
+    let typst_rules = " Use strict Typst syntax. For inline math, write with single dollar delimiters like `$ x^2 + y^2 $`. For display (block) math, write equation content on its own line with `$ ... $`. Use fraction as `symbol/` form such as `a/b`, `x/(y+1)`, and avoid `frac(...)`. Do not output LaTeX-style backslashes or curly braces; Typst output must not contain `\\`, `{`, or `}`. Always use `dots` instead of `cdots` (for example `a_1, a_2, dots, a_n`). Return valid Typst content only.";
     format!("{base}{typst_rules}")
 }
 

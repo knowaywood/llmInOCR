@@ -41,6 +41,7 @@ const modelInput = document.getElementById("model");
 const apiKeyInput = document.getElementById("api-key");
 const baseUrlInput = document.getElementById("base-url");
 const saveSettingsBtn = document.getElementById("save-settings");
+const systemThemeQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
 function setStatus(message) {
   statusLabel.textContent = message;
@@ -159,14 +160,43 @@ function selectedImageIndices() {
     .sort((a, b) => b - a);
 }
 
+function resolvedTheme(mode) {
+  if (mode === "system") {
+    return systemThemeQuery?.matches ? "dark" : "light";
+  }
+
+  return mode === "dark" ? "dark" : "light";
+}
+
 function applyTheme(mode) {
-  document.documentElement.dataset.theme = mode === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = resolvedTheme(mode);
+}
+
+function bindSystemTheme() {
+  if (!systemThemeQuery) {
+    return;
+  }
+
+  const handleChange = () => {
+    if (themeMode.value === "system") {
+      applyTheme("system");
+    }
+  };
+
+  if (typeof systemThemeQuery.addEventListener === "function") {
+    systemThemeQuery.addEventListener("change", handleChange);
+    return;
+  }
+
+  if (typeof systemThemeQuery.addListener === "function") {
+    systemThemeQuery.addListener(handleChange);
+  }
 }
 
 async function loadSettings() {
   const settings = await invoke("get_settings");
   outputFormat.value = settings.output_format;
-  themeMode.value = settings.theme_mode || "light";
+  themeMode.value = settings.theme_mode || "system";
   modelInput.value = settings.model;
   apiKeyInput.value = settings.api_key || "";
   baseUrlInput.value = settings.qwen_base_url || "";
@@ -341,6 +371,7 @@ async function bootstrap() {
     return;
   }
 
+  bindSystemTheme();
   bindEvents();
   refreshImageList();
 

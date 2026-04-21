@@ -1,19 +1,23 @@
-use futures_util::future::{AbortHandle, Abortable};
+use futures_util::{
+    future::{AbortHandle, Abortable},
+    StreamExt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::Duration,
 };
+use tauri::{Emitter, Window};
 
 const SETTINGS_FILE: &str = ".llminocr_settings.json";
-const DEFAULT_MODEL: &str = "qwen3.6-plus";
+const DEFAULT_MODEL: &str = "qwen3.5-flash";
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 struct AppState {
     current_abort: Mutex<Option<AbortHandle>>,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +26,7 @@ enum OutputFormat {
     Typst,
     Latex,
     Mathtype,
+    Markdown,
 }
 
 impl Default for OutputFormat {
@@ -77,13 +82,15 @@ struct UpdateSettingsRequest {
 
 #[derive(Debug, Deserialize)]
 struct ConvertRequest {
+    request_id: String,
     text: Option<String>,
     images: Vec<ImageInput>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ImageInput {
-    name: String,
+    #[serde(rename = "name")]
+    _name: String,
     data_url: String,
 }
 
@@ -92,6 +99,14 @@ struct ConvertResponse {
     output_format: OutputFormat,
     model: String,
     result: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StreamPayload {
+    request_id: String,
+    kind: String,
+    chunk: Option<String>,
+    message: Option<String>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -176,11 +191,17 @@ fn format_instruction(output_format: &OutputFormat) -> String {
         OutputFormat::Typst => "Typst",
         OutputFormat::Latex => "LaTeX",
         OutputFormat::Mathtype => "MathType",
+        OutputFormat::Markdown => "Markdown",
     };
 
     let base = format!(
         "You are a precise math conversion assistant. Convert the input to {target}. Return only the converted content, without markdown fences or explanations."
     );
+
+    if matches!(output_format, OutputFormat::Markdown) {
+        let markdown_rules = " Use valid Markdown. Keep math expressions in `$...$` for inline and `$$...$$` for block formulas. Do not include code fences or extra commentary.";
+        return format!("{base}{markdown_rules}");
+    }
 
     if !matches!(output_format, OutputFormat::Typst) {
         return base;
@@ -243,27 +264,119 @@ fn resolve_base_url(settings: &AppSettings) -> String {
     DEFAULT_BASE_URL.to_string()
 }
 
-fn extract_result_content(response: &Value) -> Result<String, String> {
-    let content = &response["choices"][0]["message"]["content"];
+fn emit_stream(window: &Window, request_id: &str, kind: &str, chunk: Option<String>, message: Option<String>) {
+    let _ = window.emit(
+        "convert-stream",
+        StreamPayload {
+            request_id: request_id.to_string(),
+            kind: kind.to_string(),
+            chunk,
+            message,
+        },
+    );
+}
 
-    if let Some(text) = content.as_str() {
-        return Ok(text.trim().to_string());
+fn extract_stream_delta(chunk: &Value) -> Option<String> {
+    let delta = &chunk["choices"][0]["delta"]["content"];
+
+    if let Some(text) = delta.as_str() {
+        return Some(text.to_string());
     }
 
-    if let Some(items) = content.as_array() {
+    if let Some(items) = delta.as_array() {
         let mut fragments = Vec::new();
         for item in items {
             if let Some(text) = item.get("text").and_then(Value::as_str) {
-                fragments.push(text.trim().to_string());
+                fragments.push(text);
             }
         }
-        let joined = fragments.join("\n").trim().to_string();
-        if !joined.is_empty() {
-            return Ok(joined);
+
+        if !fragments.is_empty() {
+            return Some(fragments.join(""));
         }
     }
 
-    Err(format!("Unexpected Qwen response format: {response}"))
+    None
+}
+
+async fn stream_chat_completion(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &Value,
+    window: &Window,
+    request_id: &str,
+) -> Result<String, String> {
+    let resp = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("Qwen request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let raw = resp
+            .text()
+            .await
+            .map_err(|e| format!("Qwen request failed while reading response: {e}"))?;
+        return Err(format!("Qwen request failed ({status}): {raw}"));
+    }
+
+    emit_stream(
+        window,
+        request_id,
+        "start",
+        None,
+        Some("Streaming response...".to_string()),
+    );
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut result = String::new();
+
+    while let Some(item) = stream.next().await {
+        let bytes = item.map_err(|e| format!("Qwen stream failed: {e}"))?;
+        let text = String::from_utf8_lossy(&bytes);
+        buffer.push_str(&text);
+
+        while let Some(split_at) = buffer.find("\n\n") {
+            let event = buffer[..split_at].to_string();
+            buffer.drain(..split_at + 2);
+
+            for line in event.lines() {
+                let line = line.trim();
+                if !line.starts_with("data:") {
+                    continue;
+                }
+
+                let data = line.trim_start_matches("data:").trim();
+                if data.is_empty() {
+                    continue;
+                }
+
+                if data == "[DONE]" {
+                    return Ok(result.trim().to_string());
+                }
+
+                let parsed: Value = serde_json::from_str(data)
+                    .map_err(|e| format!("Invalid Qwen stream JSON: {e}. Raw: {data}"))?;
+
+                if let Some(delta) = extract_stream_delta(&parsed) {
+                    result.push_str(&delta);
+                    emit_stream(window, request_id, "chunk", Some(delta), None);
+                }
+            }
+        }
+    }
+
+    if !buffer.trim().is_empty() {
+        return Err(format!("Qwen stream ended unexpectedly. Raw tail: {}", buffer.trim()));
+    }
+
+    Ok(result.trim().to_string())
 }
 
 #[tauri::command]
@@ -331,9 +444,14 @@ fn cancel_convert(state: tauri::State<'_, AppState>) -> Result<(), String> {
 async fn convert(
     req: ConvertRequest,
     state: tauri::State<'_, AppState>,
+    window: Window,
 ) -> Result<ConvertResponse, String> {
     let settings = read_settings()?;
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    let request_id = req.request_id.clone();
+    let stream_request_id = request_id.clone();
+    let http_client = state.http_client.clone();
+    let stream_window = window.clone();
 
     {
         let mut current_abort = state
@@ -405,35 +523,19 @@ async fn convert(
         let body = json!({
             "model": settings.model,
             "messages": messages,
-            "temperature": 0
+            "temperature": 0,
+            "stream": true
         });
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-        let resp = client
-            .post(endpoint)
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Qwen request failed: {e}"))?;
-
-        let status = resp.status();
-        let raw = resp
-            .text()
-            .await
-            .map_err(|e| format!("Qwen request failed while reading response: {e}"))?;
-
-        if !status.is_success() {
-            return Err(format!("Qwen request failed ({status}): {raw}"));
-        }
-
-        let parsed: Value = serde_json::from_str(&raw)
-            .map_err(|e| format!("Invalid Qwen response JSON: {e}. Raw: {raw}"))?;
-        let result = extract_result_content(&parsed)?;
+        let result = stream_chat_completion(
+            &http_client,
+            &endpoint,
+            &api_key,
+            &body,
+            &stream_window,
+            &stream_request_id,
+        )
+        .await?;
 
         Ok(ConvertResponse {
             output_format: settings.output_format,
@@ -450,7 +552,16 @@ async fn convert(
 
     match result {
         Ok(response) => response,
-        Err(_) => Err("Conversion cancelled.".to_string()),
+        Err(_) => {
+            emit_stream(
+                &window,
+                &request_id,
+                "error",
+                None,
+                Some("Conversion cancelled.".to_string()),
+            );
+            Err("Conversion cancelled.".to_string())
+        }
     }
 }
 
@@ -461,6 +572,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             current_abort: Mutex::new(None),
+            http_client: reqwest::Client::builder()
+                .build()
+                .expect("failed to build shared HTTP client"),
         })
         .plugin(
             tauri_plugin_log::Builder::default()

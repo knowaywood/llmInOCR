@@ -55,6 +55,7 @@
             <option value="typst">typst</option>
             <option value="latex">latex</option>
             <option value="mathtype">mathtype</option>
+            <option value="markdown">markdown</option>
           </select>
 
           <label for="theme-mode">Theme</label>
@@ -65,7 +66,11 @@
           </select>
 
           <label for="model">Model</label>
-          <input id="model" type="text" />
+          <select id="model">
+            <option value="qwen3.5-flash">qwen3.5-flash</option>
+            <option value="qwen-plus">qwen-plus</option>
+            <option value="qwen3.6-plus">qwen3.6-plus</option>
+          </select>
 
           <label for="api-key">API Key</label>
           <input

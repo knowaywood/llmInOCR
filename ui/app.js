@@ -11,11 +11,31 @@ function resolveInvoke() {
 }
 
 const invoke = resolveInvoke();
+const listen = resolveListen();
+
+const IMAGE_MAX_EDGE = 1600;
+const IMAGE_OUTPUT_TYPE = "image/jpeg";
+const IMAGE_QUALITY = 0.82;
+const STREAM_EVENT = "convert-stream";
 
 const state = {
   images: [],
   busy: false,
+  currentRequestId: null,
+  unlistenStream: null,
 };
+
+function resolveListen() {
+  if (typeof window.__TAURI__?.event?.listen === "function") {
+    return window.__TAURI__.event.listen;
+  }
+
+  if (typeof window.__TAURI_INTERNALS__?.event?.listen === "function") {
+    return window.__TAURI_INTERNALS__.event.listen;
+  }
+
+  return null;
+}
 
 const tabs = document.querySelectorAll(".tab-btn");
 const panels = {
@@ -113,6 +133,206 @@ function readFileAsDataUrl(file) {
     reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Failed to load image"));
+    img.src = dataUrl;
+  });
+}
+
+function scaledSize(width, height, maxEdge) {
+  const longest = Math.max(width, height);
+  if (longest <= maxEdge) {
+    return { width, height };
+  }
+
+  const ratio = maxEdge / longest;
+  return {
+    width: Math.max(1, Math.round(width * ratio)),
+    height: Math.max(1, Math.round(height * ratio)),
+  };
+}
+
+function canvasToDataUrl(canvas, type = IMAGE_OUTPUT_TYPE, quality = IMAGE_QUALITY) {
+  return canvas.toDataURL(type, quality);
+}
+
+async function compressImageDataUrl(dataUrl) {
+  const normalized = normalizeDataUrl(dataUrl);
+  if (!normalized) {
+    return null;
+  }
+
+  const img = await loadImage(normalized);
+  const size = scaledSize(img.naturalWidth || img.width, img.naturalHeight || img.height, IMAGE_MAX_EDGE);
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas 2D context is unavailable");
+  }
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvasToDataUrl(canvas);
+}
+
+async function mergeImagesDataUrls(images) {
+  if (images.length === 0) {
+    return [];
+  }
+
+  if (images.length === 1) {
+    return [{ name: images[0].name, dataUrl: images[0].dataUrl }];
+  }
+
+  const loaded = await Promise.all(
+    images.map(async (image) => {
+      const img = await loadImage(image.dataUrl);
+      return {
+        name: image.name,
+        img,
+        width: img.naturalWidth || img.width,
+        height: img.naturalHeight || img.height,
+      };
+    }),
+  );
+
+  const targetWidth = Math.min(
+    IMAGE_MAX_EDGE,
+    Math.max(...loaded.map((item) => item.width)),
+  );
+
+  const layout = loaded.map((item) => {
+    const ratio = targetWidth / item.width;
+    return {
+      ...item,
+      drawWidth: targetWidth,
+      drawHeight: Math.max(1, Math.round(item.height * ratio)),
+    };
+  });
+
+  const totalHeight = layout.reduce((sum, item) => sum + item.drawHeight, 0);
+  const canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = totalHeight;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas 2D context is unavailable");
+  }
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  let offsetY = 0;
+  for (const item of layout) {
+    ctx.drawImage(item.img, 0, offsetY, item.drawWidth, item.drawHeight);
+    offsetY += item.drawHeight;
+  }
+
+  return [
+    {
+      name: `merged-${Date.now()}.jpg`,
+      dataUrl: canvasToDataUrl(canvas),
+    },
+  ];
+}
+
+function estimateBytes(dataUrl) {
+  const base64 = typeof dataUrl === "string" ? dataUrl.split(",")[1] || "" : "";
+  return Math.floor((base64.length * 3) / 4);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function prepareImagesForUpload(images) {
+  const compressed = [];
+  let originalBytes = 0;
+  let compressedBytes = 0;
+
+  for (const image of images) {
+    originalBytes += estimateBytes(image.dataUrl);
+    const dataUrl = await compressImageDataUrl(image.dataUrl);
+    if (!dataUrl) {
+      continue;
+    }
+
+    compressed.push({
+      name: image.name,
+      dataUrl,
+    });
+    compressedBytes += estimateBytes(dataUrl);
+  }
+
+  const merged = await mergeImagesDataUrls(compressed);
+  const mergedBytes = merged.reduce((sum, image) => sum + estimateBytes(image.dataUrl), 0);
+
+  return {
+    images: merged,
+    stats: {
+      sourceCount: images.length,
+      uploadCount: merged.length,
+      originalBytes,
+      compressedBytes,
+      mergedBytes,
+    },
+  };
+}
+
+async function ensureStreamListener() {
+  if (state.unlistenStream || !listen) {
+    return;
+  }
+
+  state.unlistenStream = await listen(STREAM_EVENT, (event) => {
+    const payload = event?.payload;
+    if (!payload || payload.request_id !== state.currentRequestId) {
+      return;
+    }
+
+    if (payload.kind === "start") {
+      outputText.value = "";
+      setStatus(payload.message || "Streaming response...");
+      return;
+    }
+
+    if (payload.kind === "chunk") {
+      outputText.value += payload.chunk || "";
+      outputText.scrollTop = outputText.scrollHeight;
+      setStatus("Receiving streamed result...");
+      return;
+    }
+
+    if (payload.kind === "error") {
+      setStatus(payload.message || "Streaming failed");
+    }
   });
 }
 
@@ -231,12 +451,27 @@ async function runConvert() {
     return;
   }
 
-  setBusy(true, state.images.length > 0 ? `Converting images... (${state.images.length} images)` : "Converting text...");
+  await ensureStreamListener();
+  const requestId = createRequestId();
+  state.currentRequestId = requestId;
+  outputText.value = "";
+  setBusy(true, state.images.length > 0 ? `Preparing images... (${state.images.length} images)` : "Converting text...");
 
   try {
+    let images = [];
+    if (state.images.length > 0) {
+      const prepared = await prepareImagesForUpload(state.images);
+      images = prepared.images.map((img) => ({ name: img.name, data_url: img.dataUrl }));
+      setStatus(
+        `Uploading ${prepared.stats.uploadCount} image(s), source ${prepared.stats.sourceCount}. ` +
+          `${formatBytes(prepared.stats.originalBytes)} -> ${formatBytes(prepared.stats.mergedBytes)}`,
+      );
+    }
+
     const req = {
+      request_id: requestId,
       text,
-      images: state.images.map((img) => ({ name: img.name, data_url: img.dataUrl })),
+      images,
     };
 
     const result = await invoke("convert", { req });

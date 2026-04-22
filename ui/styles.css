@@ -104,6 +104,12 @@ h3 {
   margin: 0 0 10px;
 }
 
+.result-meta {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .image-preview {
   border: 1px dashed var(--preview-line);
   border-radius: 8px;

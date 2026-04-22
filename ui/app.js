@@ -52,6 +52,7 @@ const inputText = document.getElementById("input-text");
 const stopBtn = document.getElementById("stop-btn");
 const convertBtn = document.getElementById("convert-btn");
 const outputText = document.getElementById("output-text");
+const resultMeta = document.getElementById("result-meta");
 const copyResultBtn = document.getElementById("copy-result");
 const statusLabel = document.getElementById("status-label");
 
@@ -67,6 +68,15 @@ let settingsFeedbackTimer = null;
 
 function setStatus(message) {
   statusLabel.textContent = message;
+}
+
+function setResultMeta(format, model) {
+  if (!resultMeta) {
+    return;
+  }
+  const shownFormat = format || "-";
+  const shownModel = model || "-";
+  resultMeta.textContent = `Format: ${shownFormat} | Model: ${shownModel}`;
 }
 
 function setSettingsFeedback(message, type = "success") {
@@ -443,6 +453,7 @@ async function loadSettings() {
   modelInput.value = settings.model;
   apiKeyInput.value = settings.api_key || "";
   baseUrlInput.value = settings.qwen_base_url || "";
+  setResultMeta(settings.output_format, settings.model);
   applyTheme(themeMode.value);
 }
 
@@ -465,6 +476,7 @@ async function saveSettings() {
   try {
     await invoke("update_settings", { req });
     applyTheme(themeMode.value);
+    setResultMeta(outputFormat.value, model);
     setStatus("Settings saved");
     setSettingsFeedback("Settings saved successfully.", "success");
   } catch (err) {
@@ -508,6 +520,7 @@ async function runConvert() {
 
     const result = await invoke("convert", { req });
     outputText.value = result.result || "";
+    setResultMeta(result.output_format, result.model);
     setBusy(false, "Conversion completed");
   } catch (err) {
     const message = typeof err === "string" ? err : JSON.stringify(err);

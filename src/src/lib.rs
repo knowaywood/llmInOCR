@@ -9,11 +9,17 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{Emitter, Window};
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, Window,
+};
 
 const SETTINGS_FILE: &str = ".llminocr_settings.json";
 const DEFAULT_MODEL: &str = "qwen3.5-flash";
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+const TRAY_MENU_SHOW: &str = "show_window";
+const TRAY_MENU_QUIT: &str = "quit_app";
 
 struct AppState {
     current_abort: Mutex<Option<AbortHandle>>,
@@ -274,6 +280,14 @@ fn emit_stream(window: &Window, request_id: &str, kind: &str, chunk: Option<Stri
             message,
         },
     );
+}
+
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 fn extract_stream_delta(chunk: &Value) -> Option<String> {
@@ -581,6 +595,48 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .setup(|app| {
+            let tray_menu = MenuBuilder::new(app)
+                .text(TRAY_MENU_SHOW, "Show llmInOCR")
+                .separator()
+                .text(TRAY_MENU_QUIT, "Quit")
+                .build()?;
+
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                .menu(&tray_menu)
+                .tooltip("llmInOCR")
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    TRAY_MENU_SHOW => show_main_window(app),
+                    TRAY_MENU_QUIT => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button,
+                        button_state,
+                        ..
+                    } = event
+                    {
+                        if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                            show_main_window(tray.app_handle());
+                        }
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            tray_builder.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,

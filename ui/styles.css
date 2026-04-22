@@ -221,6 +221,21 @@ button:disabled {
   margin-top: 8px;
 }
 
+.settings-feedback {
+  grid-column: 2 / 3;
+  margin: 4px 0 0;
+  min-height: 1.2em;
+  color: var(--muted);
+}
+
+.settings-feedback.success {
+  color: #198754;
+}
+
+.settings-feedback.error {
+  color: #c62828;
+}
+
 @media (max-width: 900px) {
   .panel-grid {
     grid-template-columns: 1fr;
@@ -236,6 +251,10 @@ button:disabled {
   }
 
   .settings-form button {
+    grid-column: auto;
+  }
+
+  .settings-feedback {
     grid-column: auto;
   }
 }

@@ -61,10 +61,33 @@ const modelInput = document.getElementById("model");
 const apiKeyInput = document.getElementById("api-key");
 const baseUrlInput = document.getElementById("base-url");
 const saveSettingsBtn = document.getElementById("save-settings");
+const settingsFeedback = document.getElementById("settings-feedback");
 const systemThemeQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+let settingsFeedbackTimer = null;
 
 function setStatus(message) {
   statusLabel.textContent = message;
+}
+
+function setSettingsFeedback(message, type = "success") {
+  if (!settingsFeedback) {
+    return;
+  }
+
+  if (settingsFeedbackTimer) {
+    clearTimeout(settingsFeedbackTimer);
+    settingsFeedbackTimer = null;
+  }
+
+  settingsFeedback.textContent = message;
+  settingsFeedback.classList.remove("success", "error");
+  settingsFeedback.classList.add(type === "error" ? "error" : "success");
+
+  settingsFeedbackTimer = setTimeout(() => {
+    settingsFeedback.textContent = "";
+    settingsFeedback.classList.remove("success", "error");
+    settingsFeedbackTimer = null;
+  }, 3000);
 }
 
 function setBusy(busy, message) {
@@ -426,7 +449,7 @@ async function loadSettings() {
 async function saveSettings() {
   const model = modelInput.value.trim();
   if (!model) {
-    alert("Model cannot be empty.");
+    setSettingsFeedback("Model cannot be empty.", "error");
     return;
   }
 
@@ -438,9 +461,18 @@ async function saveSettings() {
     qwen_base_url: baseUrlInput.value.trim() || null,
   };
 
-  await invoke("update_settings", { req });
-  applyTheme(themeMode.value);
-  setStatus("Settings saved");
+  saveSettingsBtn.disabled = true;
+  try {
+    await invoke("update_settings", { req });
+    applyTheme(themeMode.value);
+    setStatus("Settings saved");
+    setSettingsFeedback("Settings saved successfully.", "success");
+  } catch (err) {
+    const message = typeof err === "string" ? err : JSON.stringify(err);
+    setSettingsFeedback(`Failed to save settings: ${message}`, "error");
+  } finally {
+    saveSettingsBtn.disabled = state.busy;
+  }
 }
 
 async function runConvert() {

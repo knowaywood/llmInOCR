@@ -218,68 +218,6 @@ async function compressImageDataUrl(dataUrl) {
   return canvasToDataUrl(canvas);
 }
 
-async function mergeImagesDataUrls(images) {
-  if (images.length === 0) {
-    return [];
-  }
-
-  if (images.length === 1) {
-    return [{ name: images[0].name, dataUrl: images[0].dataUrl }];
-  }
-
-  const loaded = await Promise.all(
-    images.map(async (image) => {
-      const img = await loadImage(image.dataUrl);
-      return {
-        name: image.name,
-        img,
-        width: img.naturalWidth || img.width,
-        height: img.naturalHeight || img.height,
-      };
-    }),
-  );
-
-  const targetWidth = Math.min(
-    IMAGE_MAX_EDGE,
-    Math.max(...loaded.map((item) => item.width)),
-  );
-
-  const layout = loaded.map((item) => {
-    const ratio = targetWidth / item.width;
-    return {
-      ...item,
-      drawWidth: targetWidth,
-      drawHeight: Math.max(1, Math.round(item.height * ratio)),
-    };
-  });
-
-  const totalHeight = layout.reduce((sum, item) => sum + item.drawHeight, 0);
-  const canvas = document.createElement("canvas");
-  canvas.width = targetWidth;
-  canvas.height = totalHeight;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas 2D context is unavailable");
-  }
-
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  let offsetY = 0;
-  for (const item of layout) {
-    ctx.drawImage(item.img, 0, offsetY, item.drawWidth, item.drawHeight);
-    offsetY += item.drawHeight;
-  }
-
-  return [
-    {
-      name: `merged-${Date.now()}.jpg`,
-      dataUrl: canvasToDataUrl(canvas),
-    },
-  ];
-}
-
 function estimateBytes(dataUrl) {
   const base64 = typeof dataUrl === "string" ? dataUrl.split(",")[1] || "" : "";
   return Math.floor((base64.length * 3) / 4);
@@ -324,17 +262,13 @@ async function prepareImagesForUpload(images) {
     compressedBytes += estimateBytes(dataUrl);
   }
 
-  const merged = await mergeImagesDataUrls(compressed);
-  const mergedBytes = merged.reduce((sum, image) => sum + estimateBytes(image.dataUrl), 0);
-
   return {
-    images: merged,
+    images: compressed,
     stats: {
       sourceCount: images.length,
-      uploadCount: merged.length,
+      uploadCount: compressed.length,
       originalBytes,
       compressedBytes,
-      mergedBytes,
     },
   };
 }
@@ -508,7 +442,7 @@ async function runConvert() {
       images = prepared.images.map((img) => ({ name: img.name, data_url: img.dataUrl }));
       setStatus(
         `Uploading ${prepared.stats.uploadCount} image(s), source ${prepared.stats.sourceCount}. ` +
-          `${formatBytes(prepared.stats.originalBytes)} -> ${formatBytes(prepared.stats.mergedBytes)}`,
+          `${formatBytes(prepared.stats.originalBytes)} -> ${formatBytes(prepared.stats.compressedBytes)}`,
       );
     }
 

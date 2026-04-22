@@ -95,8 +95,7 @@ struct ConvertRequest {
 
 #[derive(Debug, Deserialize)]
 struct ImageInput {
-    #[serde(rename = "name")]
-    _name: String,
+    name: String,
     data_url: String,
 }
 
@@ -118,10 +117,6 @@ struct StreamPayload {
 fn settings_path() -> Result<PathBuf, String> {
     let cwd = env::current_dir().map_err(|e| format!("Failed to get current directory: {e}"))?;
     Ok(cwd.join(SETTINGS_FILE))
-}
-
-fn normalize_settings(settings: AppSettings) -> AppSettings {
-    settings
 }
 
 fn load_env_file(path: &Path) {
@@ -168,9 +163,8 @@ fn load_env_files() {
 }
 
 fn write_settings(settings: &AppSettings) -> Result<(), String> {
-    let settings = normalize_settings(settings.clone());
     let path = settings_path()?;
-    let content = serde_json::to_string_pretty(&settings)
+    let content = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to encode settings: {e}"))?;
     fs::write(path, content).map_err(|e| format!("Failed to write settings: {e}"))
 }
@@ -187,9 +181,7 @@ fn read_settings() -> Result<AppSettings, String> {
     let parsed = serde_json::from_str::<AppSettings>(&payload)
         .map_err(|e| format!("Invalid settings JSON at {}: {e}", path.display()))?;
 
-    let normalized = normalize_settings(parsed);
-    write_settings(&normalized)?;
-    Ok(normalized)
+    Ok(parsed)
 }
 
 fn format_instruction(output_format: &OutputFormat) -> String {
@@ -437,7 +429,7 @@ fn update_settings(req: UpdateSettingsRequest) -> Result<AppSettings, String> {
     });
 
     write_settings(&current)?;
-    read_settings()
+    Ok(current)
 }
 
 #[tauri::command]
@@ -500,9 +492,28 @@ async fn convert(
             }
 
             let prompt = if req.images.len() > 1 {
-                "Extract and convert all mathematical content from all images in order."
+                let order_hint = req
+                    .images
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, image)| format!("Image {} = {}", idx + 1, image.name))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+
+                format!(
+                    "Extract and convert all mathematical content from all images in order. \
+Output requirements: \
+1) Split the output into exactly {count} sections in image order. \
+2) Each section must start with a heading line exactly `Image i:` where i is 1..{count}. \
+3) Under each heading, include only the converted content for that image. \
+4) Do not merge, reorder, or cross-mix content across images. \
+5) If an image has no mathematical content, still output its heading and write `No mathematical content.` \
+Image mapping: {order_hint}",
+                    count = req.images.len(),
+                    order_hint = order_hint
+                )
             } else {
-                "Extract and convert all mathematical content from this image."
+                "Extract and convert all mathematical content from this image.".to_string()
             };
 
             content.push(json!({ "type": "text", "text": prompt }));

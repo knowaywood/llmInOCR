@@ -61,10 +61,15 @@ const themeMode = document.getElementById("theme-mode");
 const modelInput = document.getElementById("model");
 const apiKeyInput = document.getElementById("api-key");
 const baseUrlInput = document.getElementById("base-url");
+const systemPromptInput = document.getElementById("system-prompt");
 const saveSettingsBtn = document.getElementById("save-settings");
+const revertPromptBtn = document.getElementById("revert-prompt");
 const settingsFeedback = document.getElementById("settings-feedback");
 const systemThemeQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 let settingsFeedbackTimer = null;
+let promptsByFormat = {};
+let defaultPromptsByFormat = {};
+let promptEditingFormat = null;
 
 function setStatus(message) {
   statusLabel.textContent = message;
@@ -107,6 +112,9 @@ function setBusy(busy, message) {
   selectImagesBtn.disabled = busy;
   copyResultBtn.disabled = busy;
   saveSettingsBtn.disabled = busy;
+  if (revertPromptBtn) {
+    revertPromptBtn.disabled = busy;
+  }
   deleteSelectedBtn.disabled = busy || imageList.selectedOptions.length === 0;
   setStatus(message);
 }
@@ -359,6 +367,23 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = resolvedTheme(mode);
 }
 
+function captureCurrentPrompt() {
+  const key = promptEditingFormat || outputFormat.value;
+  promptsByFormat[key] = systemPromptInput.value;
+}
+
+function promptForFormat(format) {
+  return promptsByFormat[format] || "";
+}
+
+function autoResizePromptTextarea() {
+  if (!systemPromptInput) {
+    return;
+  }
+  systemPromptInput.style.height = "auto";
+  systemPromptInput.style.height = `${systemPromptInput.scrollHeight}px`;
+}
+
 function bindSystemTheme() {
   if (!systemThemeQuery) {
     return;
@@ -381,14 +406,34 @@ function bindSystemTheme() {
 }
 
 async function loadSettings() {
-  const settings = await invoke("get_settings");
+  const [settings, defaults] = await Promise.all([
+    invoke("get_settings"),
+    invoke("get_default_system_prompts"),
+  ]);
+  defaultPromptsByFormat = defaults || {};
+  promptsByFormat = settings.system_prompts ? { ...settings.system_prompts } : {};
   outputFormat.value = settings.output_format;
+  promptEditingFormat = outputFormat.value;
   themeMode.value = settings.theme_mode || "system";
   modelInput.value = settings.model;
   apiKeyInput.value = settings.api_key || "";
   baseUrlInput.value = settings.qwen_base_url || "";
+  systemPromptInput.value = promptForFormat(outputFormat.value);
+  autoResizePromptTextarea();
   setResultMeta(settings.output_format, settings.model);
   applyTheme(themeMode.value);
+}
+
+function revertPromptToDefault() {
+  captureCurrentPrompt();
+  const format = outputFormat.value;
+  const fallback = promptForFormat(format);
+  const next = defaultPromptsByFormat[format] || fallback;
+  promptsByFormat[format] = next;
+  promptEditingFormat = format;
+  systemPromptInput.value = next;
+  autoResizePromptTextarea();
+  setSettingsFeedback("Reverted current format prompt to default. Click Save Settings to persist.", "success");
 }
 
 async function saveSettings() {
@@ -398,12 +443,15 @@ async function saveSettings() {
     return;
   }
 
+  captureCurrentPrompt();
+
   const req = {
     output_format: outputFormat.value,
     theme_mode: themeMode.value,
     model,
     api_key: apiKeyInput.value.trim() || null,
     qwen_base_url: baseUrlInput.value.trim() || null,
+    system_prompts: promptsByFormat,
   };
 
   saveSettingsBtn.disabled = true;
@@ -575,8 +623,18 @@ function bindEvents() {
   convertBtn.addEventListener("click", runConvert);
   stopBtn.addEventListener("click", stopConvert);
   saveSettingsBtn.addEventListener("click", saveSettings);
+  if (revertPromptBtn) {
+    revertPromptBtn.addEventListener("click", revertPromptToDefault);
+  }
   copyResultBtn.addEventListener("click", copyResult);
   themeMode.addEventListener("change", () => applyTheme(themeMode.value));
+  systemPromptInput.addEventListener("input", autoResizePromptTextarea);
+  outputFormat.addEventListener("change", () => {
+    captureCurrentPrompt();
+    promptEditingFormat = outputFormat.value;
+    systemPromptInput.value = promptForFormat(promptEditingFormat);
+    autoResizePromptTextarea();
+  });
 }
 
 async function bootstrap() {

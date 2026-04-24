@@ -221,7 +221,27 @@ button:disabled {
   max-width: 760px;
 }
 
-.settings-form button {
+.prompt-editor {
+  grid-column: 2 / 3;
+  width: 100%;
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+
+#system-prompt {
+  width: 100%;
+  display: block;
+  min-height: 120px;
+  max-height: 55vh;
+  overflow-y: auto;
+  resize: none;
+}
+
+#save-settings {
   grid-column: 2 / 3;
   justify-self: start;
   margin-top: 8px;
@@ -256,7 +276,11 @@ button:disabled {
     max-width: none;
   }
 
-  .settings-form button {
+  #save-settings {
+    grid-column: auto;
+  }
+
+  .prompt-editor {
     grid-column: auto;
   }
 

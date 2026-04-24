@@ -5,6 +5,7 @@ use futures_util::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -35,6 +36,26 @@ enum OutputFormat {
     Markdown,
 }
 
+impl OutputFormat {
+    fn as_key(&self) -> &'static str {
+        match self {
+            OutputFormat::Typst => "typst",
+            OutputFormat::Latex => "latex",
+            OutputFormat::Mathtype => "mathtype",
+            OutputFormat::Markdown => "markdown",
+        }
+    }
+
+    fn all() -> [OutputFormat; 4] {
+        [
+            OutputFormat::Typst,
+            OutputFormat::Latex,
+            OutputFormat::Mathtype,
+            OutputFormat::Markdown,
+        ]
+    }
+}
+
 impl Default for OutputFormat {
     fn default() -> Self {
         Self::Latex
@@ -63,6 +84,10 @@ struct AppSettings {
     model: String,
     api_key: Option<String>,
     qwen_base_url: Option<String>,
+    #[serde(default)]
+    system_prompts: BTreeMap<String, String>,
+    #[serde(default, rename = "system_prompt", skip_serializing)]
+    legacy_system_prompt: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -73,6 +98,8 @@ impl Default for AppSettings {
             model: DEFAULT_MODEL.to_string(),
             api_key: None,
             qwen_base_url: None,
+            system_prompts: default_prompt_map(),
+            legacy_system_prompt: None,
         }
     }
 }
@@ -84,6 +111,8 @@ struct UpdateSettingsRequest {
     model: Option<String>,
     api_key: Option<String>,
     qwen_base_url: Option<String>,
+    system_prompt: Option<String>,
+    system_prompts: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,13 +207,58 @@ fn read_settings() -> Result<AppSettings, String> {
     }
 
     let payload = fs::read_to_string(&path).map_err(|e| format!("Failed to read settings: {e}"))?;
-    let parsed = serde_json::from_str::<AppSettings>(&payload)
+    let mut parsed = serde_json::from_str::<AppSettings>(&payload)
         .map_err(|e| format!("Invalid settings JSON at {}: {e}", path.display()))?;
+
+    let mut changed = ensure_prompt_defaults(&mut parsed);
+
+    if let Some(legacy) = parsed.legacy_system_prompt.clone() {
+        let t = legacy.trim();
+        if !t.is_empty() {
+            let active_key = parsed.output_format.as_key().to_string();
+            if let Some(current) = parsed.system_prompts.get(&active_key) {
+                if current.trim().is_empty() || current == &default_format_instruction(&parsed.output_format) {
+                    parsed.system_prompts.insert(active_key, t.to_string());
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        let _ = write_settings(&parsed);
+    }
 
     Ok(parsed)
 }
 
-fn format_instruction(output_format: &OutputFormat) -> String {
+fn default_prompt_map() -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for fmt in OutputFormat::all() {
+        map.insert(fmt.as_key().to_string(), default_format_instruction(&fmt));
+    }
+    map
+}
+
+fn ensure_prompt_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    for fmt in OutputFormat::all() {
+        let key = fmt.as_key().to_string();
+        let default_prompt = default_format_instruction(&fmt);
+        let needs_default = settings
+            .system_prompts
+            .get(&key)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true);
+        if needs_default {
+            settings.system_prompts.insert(key, default_prompt);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn default_format_instruction(output_format: &OutputFormat) -> String {
     let target = match output_format {
         OutputFormat::Typst => "Typst",
         OutputFormat::Latex => "LaTeX",
@@ -205,8 +279,19 @@ fn format_instruction(output_format: &OutputFormat) -> String {
         return base;
     }
 
-    let typst_rules = " Use strict Typst syntax. For inline math, write with single dollar delimiters like `$ x^2 + y^2 $`. For display (block) math, write equation content on its own line with `$ ... $`. Use fraction as `symbol/` form such as `a/b`, `x/(y+1)`, and avoid `frac(...)`. Do not output LaTeX-style backslashes or curly braces; Typst output must not contain `\\`, `{`, or `}`. Always use `dots` instead of `cdots` (for example `a_1, a_2, dots, a_n`). Return valid Typst content only.";
+    let typst_rules = r#" Use strict Typst syntax. For inline math, use compact single-dollar delimiters without inner spaces, like `$a$`, `$x^2+y^2$`. For display (block) math, place equation content on its own line and wrap it as `$ a+b $` with a space after the opening `$` and before the closing `$`. Replace any `||x||` or `|| x ||` notation with `norm(x)`. Use fraction as `symbol/` form such as `a/b`, `x/(y+1)`, and avoid `frac(...)`. Always use `dots` instead of `cdots` (for example `a_1, a_2, dots, a_n`). Return valid Typst content only as raw text."#;
     format!("{base}{typst_rules}")
+}
+
+fn format_instruction(settings: &AppSettings) -> String {
+    let key = settings.output_format.as_key();
+    if let Some(prompt) = settings.system_prompts.get(key) {
+        if !prompt.trim().is_empty() {
+            return prompt.to_string();
+        }
+    }
+
+    default_format_instruction(&settings.output_format)
 }
 
 fn resolve_api_key(settings: &AppSettings) -> Result<String, String> {
@@ -391,6 +476,11 @@ fn get_settings() -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
+fn get_default_system_prompts() -> BTreeMap<String, String> {
+    default_prompt_map()
+}
+
+#[tauri::command]
 fn update_settings(req: UpdateSettingsRequest) -> Result<AppSettings, String> {
     let mut current = read_settings()?;
 
@@ -428,6 +518,37 @@ fn update_settings(req: UpdateSettingsRequest) -> Result<AppSettings, String> {
         }
     });
 
+    if let Some(system_prompt) = req.system_prompt {
+        let trimmed = system_prompt.trim();
+        if trimmed.is_empty() {
+            current.system_prompts.insert(
+                current.output_format.as_key().to_string(),
+                default_format_instruction(&current.output_format),
+            );
+        } else {
+            current
+                .system_prompts
+                .insert(current.output_format.as_key().to_string(), trimmed.to_string());
+        }
+    }
+
+    if let Some(system_prompts) = req.system_prompts {
+        for fmt in OutputFormat::all() {
+            let key = fmt.as_key().to_string();
+            if let Some(prompt) = system_prompts.get(&key) {
+                let trimmed = prompt.trim();
+                if trimmed.is_empty() {
+                    current
+                        .system_prompts
+                        .insert(key, default_format_instruction(&fmt));
+                } else {
+                    current.system_prompts.insert(key, trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    ensure_prompt_defaults(&mut current);
     write_settings(&current)?;
     Ok(current)
 }
@@ -521,7 +642,7 @@ Image mapping: {order_hint}",
             json!([
                 {
                     "role": "system",
-                    "content": format_instruction(&settings.output_format)
+                    "content": format_instruction(&settings)
                 },
                 {
                     "role": "user",
@@ -532,7 +653,7 @@ Image mapping: {order_hint}",
             json!([
                 {
                     "role": "system",
-                    "content": format_instruction(&settings.output_format)
+                    "content": format_instruction(&settings)
                 },
                 {
                     "role": "user",
@@ -613,7 +734,7 @@ pub fn run() {
                 .text(TRAY_MENU_QUIT, "Quit")
                 .build()?;
 
-            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+            let tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&tray_menu)
                 .tooltip("llmInOCR")
                 .show_menu_on_left_click(false)
@@ -635,9 +756,12 @@ pub fn run() {
                     }
                 });
 
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray_builder = tray_builder.icon(icon);
-            }
+            #[cfg(not(target_os = "linux"))]
+            let tray_builder = if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder.icon(icon)
+            } else {
+                tray_builder
+            };
 
             tray_builder.build(app)?;
             Ok(())
@@ -650,6 +774,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_default_system_prompts,
             update_settings,
             cancel_convert,
             convert
